@@ -1,0 +1,114 @@
+#!/bin/sh
+#
+# Summary
+# -------
+#
+# 1. you have: a git repo with tagged upstream and downstream release branches
+# 2. you want: a debian package from tagged releases
+# 
+# This script is for you.
+#
+# How it works
+# ------------
+# 
+# 1. combine an upstream release branch and a downstream release branch via
+#    `git rebase`
+# 2. create required intermediary files (.orig.tar.gz, .debian.tar.gz, .dsc)
+# 3. build a deb
+#
+# Operating Assumptions
+# ---------------------
+# - The upstream and downstream release branches have git tags which
+#   identify a point in git history to release from.
+# - The upstream release branch consists of source code, sans debian/
+#   directory.
+# - The downstream release branch consists of debian packaging, only a debian/
+#   directory.
+#
+# Dependencies
+# -------------
+#
+# git, sbuild, dpkg-dev
+#
+# Configuration:
+# --------------
+# 
+# Variables may be set by creating /etc/deb-from-git/override.conf
+#
+# Side effects
+# ------------
+#
+# This script cleans all non-git artifacts. Commit or back up anything you care
+# about.
+#
+# This script refreshes release tags from the release repository to
+# guarantee that release tags are synced to the remote repository. This
+# prevents human error which might cause a release to exist in upstream for
+# which a tag was never pushed to the release repository.
+#
+# Why is this a shell script?
+# ---------------------------
+# 
+# I don't like shell scripts, but every single operation in this script
+# is a discrete command which glues together file name and location
+# expectations of 1) your git repository and 2) dpkg-dev tools.
+#
+# This script has very simple logic. It is non-interactive. All inputs are
+# specified before runtime. It does no parsing or string manipulation, has no
+# conditional execution, and does not loop. It uses just a handful of parameter
+# expansions to build filepaths.
+# 
+# This simplicity comes from externalizing requirements to other tools
+# that do it better. This script does one thing, unconditionally, and it
+# clearly defines expectations.
+
+RELEASE_SERIES=jammy
+UPSTREAM_RELEASE_VERSION=23.1
+UPSTREAM_RELEASE_COMMITTISH=HEAD
+DOWNSTREAM_RELEASE_COMMITTISH=HEAD
+DOWNSTREAM_RELEASE_BRANCH=ubuntu/devel-example
+
+# Project-specific settings
+UPSTREAM_RELEASE_BRANCH=main
+PROJECT_NAME=cloud-init
+
+# Load configuration file if it exists, else use defaults
+. /etc/deb-from-git/override.conf 2> /dev/null
+
+# Make command failures fatal
+set -e
+
+# Clean your workspace
+git clean -dx --force
+
+
+# Set branch tips to release tags (for reproducibility)
+git checkout $UPSTREAM_RELEASE_BRANCH
+git branch -B "DEB_FROM_GIT_UPSTREAM"
+git reset --hard $UPSTREAM_RELEASE_COMMITTISH
+git checkout $DOWNSTREAM_RELEASE_BRANCH
+git branch -B "DEB_FROM_GIT_DOWNSTREAM"
+git reset --hard $DOWNSTREAM_RELEASE_COMMITTISH
+
+# Create orig.tar.gz
+git archive --format=tar.gz -9 --output=../${PROJECT_NAME}_${UPSTREAM_RELEASE_VERSION}.orig.tar.gz $UPSTREAM_RELEASE_COMMITTISH
+
+# Build the source and binary packages
+# ====================================
+#
+# sbuild requirements:
+#
+# 1. Archive file *.orig.tar.gz located at ../
+# 2. The current working directory must be "debianized" source tree. This means
+#    that the current directory must have a debian/ directory which matches the
+#    contents of ../*.debian.tar.gz)
+# 3. The current working directory must contain source code matching the
+#    contents of *.orig.tar.gz
+
+git rebase $UPSTREAM_RELEASE_BRANCH
+
+sbuild --dist=$RELEASE_SERIES --arch=amd64  --arch-all .
+
+# Delete branches
+git branch -d "DEB_FROM_GIT_UPSTREAM"
+git branch -d "DEB_FROM_GIT_DOWNSTREAM"
